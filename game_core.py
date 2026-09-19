@@ -8,6 +8,9 @@
    直接 import 本模块模拟点击，验证每一关确实能通关。
 """
 
+import random
+
+
 UP = "U"
 DOWN = "D"
 LEFT = "L"
@@ -171,42 +174,58 @@ class Board:
         self.__init__(self.level)
 
 
-# ---------------------------------------------------------------- 求解器
-def solve_level(level, _memo=None):
-    """
-    判断关卡是否可解，并返回一个可行的点击顺序（列表，元素为 (r,c,方向)）。
-    解不出来返回 None。用于关卡生成与自动测试。
-    思路：DFS + 记忆化，状态为剩余箭头的集合。
-    """
-    rows, cols = level.rows, level.cols
-    state = frozenset(level.arrow_specs())
-    memo = {} if _memo is None else _memo
+# ---------------------------------------------------------------- 求解器与关卡生成
+DIRS = list(DELTA.keys())
 
-    def removable(st):
-        occ = {(r, c) for (r, c, _) in st}
-        out = []
-        for a in st:
-            r, c, d = a
-            dr, dc = DELTA[d]
+# 难度曲线：经典关卡与随机关卡共用（(行, 列, 箭头数, 失误上限, 开局至少被挡数, 主题名)）
+LEVEL_CONFIGS = [
+    (4, 4, 5, 3, 1, "初次上手"),
+    (4, 4, 7, 3, 2, "两两相望"),
+    (5, 5, 9, 3, 3, "十字路口"),
+    (5, 5, 12, 4, 4, "箭阵"),
+    (6, 6, 15, 4, 5, "一箭又一箭"),
+]
+
+
+def grid_from_specs(specs, rows, cols):
+    """[(r,c,d), ...] -> ASCII 关卡文本"""
+    g = [["." for _ in range(cols)] for _ in range(rows)]
+    for (r, c, d) in specs:
+        g[r][c] = DIR_2_SYMBOL[d]
+    return ["".join(line) for line in g]
+
+
+def _removable_in(state, rows, cols):
+    """state 是 {(行,列,方向), ...}，返回其中当前能飞出棋盘的箭头。"""
+    occ = {(r, c) for (r, c, _) in state}
+    out = []
+    for a in state:
+        r, c, d = a
+        dr, dc = DELTA[d]
+        r += dr
+        c += dc
+        ok = True
+        while 0 <= r < rows and 0 <= c < cols:
+            if (r, c) in occ:
+                ok = False
+                break
             r += dr
             c += dc
-            ok = True
-            while 0 <= r < rows and 0 <= c < cols:
-                if (r, c) in occ:
-                    ok = False
-                    break
-                r += dr
-                c += dc
-            if ok:
-                out.append(a)
-        return out
+        if ok:
+            out.append(a)
+    return out
+
+
+def solve_state(state, rows, cols, memo=None):
+    """DFS + 记忆化：在“剩余箭头集合”的状态空间里搜一条清空顺序，无解返回 None。"""
+    memo = {} if memo is None else memo
 
     def dfs(st):
         if not st:
             return []
         if st in memo:
             return memo[st]
-        for a in removable(st):
+        for a in _removable_in(st, rows, cols):
             sub = dfs(st - {a})
             if sub is not None:
                 memo[st] = [a] + sub
@@ -217,7 +236,117 @@ def solve_level(level, _memo=None):
     return dfs(state)
 
 
+def solve_level(level, memo=None):
+    """
+    判断关卡是否可解，并返回一个可行的点击顺序（列表，元素为 (r,c,方向)）。
+    解不出来返回 None。用于关卡生成与自动测试。
+    """
+    return solve_state(frozenset(level.arrow_specs()), level.rows, level.cols, memo)
+
+
+def analyze_specs(specs, rows, cols, memo=None):
+    """返回 (是否可解, 通关顺序, 开局被挡箭头数)"""
+    state = frozenset(specs)
+    memo = {} if memo is None else memo
+    order = solve_state(state, rows, cols, memo)
+    if order is None:
+        return False, None, 0
+    free = _removable_in(state, rows, cols)
+    return True, order, len(state) - len(free)
+
+
+def make_random_level(rows, cols, n_arrows, mistakes, min_blocked, rng,
+                      name="随机关卡", max_tries=40000):
+    """
+    随机撒箭头，并**当场用求解器验证**：只接受“必定可通关、且开局至少有
+    min_blocked 支箭头被挡住”的布局。找不到就放宽失败上限重试。
+    返回 (Level, 求解器给出的通关顺序)。
+    """
+    cells = [(r, c) for r in range(rows) for c in range(cols)]
+    memo = {}
+    for attempt in range(max_tries):
+        # 前半程严格要求阻挡数，避免个别配置搜不到时一直失败
+        need = min_blocked if attempt < max_tries * 0.7 else max(1, min_blocked - 1)
+        pick = rng.sample(cells, n_arrows)
+        specs = [(r, c, rng.choice(DIRS)) for (r, c) in pick]
+        ok, order, blocked = analyze_specs(specs, rows, cols, memo)
+        if ok and blocked >= need:
+            lv = Level(name, grid_from_specs(specs, rows, cols), mistakes,
+                       cols=cols, rows=rows)
+            return lv, order
+    raise RuntimeError("生成关卡失败：%dx%d 箭头%d" % (rows, cols, n_arrows))
+
+
+def build_run(seed=None, configs=None):
+    """
+    生成一整局的关卡列表（默认 5 关，难度按 LEVEL_CONFIGS 递进）。
+    返回 (levels, seed)。同一个 seed 一定生成完全相同的关卡，便于复现。
+    """
+    if seed is None:
+        seed = random.SystemRandom().randrange(1, 10 ** 9)
+    rng = random.Random(seed)
+    configs = LEVEL_CONFIGS if configs is None else configs
+    levels = []
+    for i, (rows, cols, n, mis, mb, theme) in enumerate(configs):
+        lv, _order = make_random_level(
+            rows, cols, n, mis, mb, rng,
+            name="第%d关 · %s" % (i + 1, theme))
+        levels.append(lv)
+    return levels, seed
+
+
 def find_hint(board):
     """给玩家用的提示：返回一个当前可以飞出的箭头（没有则返回 None）。"""
     cand = board.removable_arrows()
     return cand[0] if cand else None
+
+
+# ---------------------------------------------------------------- 计分与星级
+MAX_STARS = 3
+
+
+def par_time(n_arrows, base=6.0, per_arrow=1.8):
+    """
+    本关目标时间（秒）：起步 6 秒 + 每支箭 1.8 秒。
+    纯函数，只和箭头数量有关，便于测试与显示。
+    """
+    return base + per_arrow * n_arrows
+
+
+def evaluate(elapsed, mistakes_used, n_arrows, max_mistakes=3):
+    """
+    结算一关的成绩。
+
+    得分：基础 1000 分
+        - 每次失误 -200
+        - 超过目标时间后按超出比例最多再扣 250（避免“慢慢磨”也能满星）
+        - 最低保底 100 分
+    星级：
+        3 星：零失误 且 用时不超过目标时间
+        2 星：失误 ≤ 1 且 用时不超过目标时间的 1.6 倍
+        1 星：通关即可
+    返回 dict：score / stars / par / time_ratio / 明细字段
+    """
+    par = max(1e-6, par_time(n_arrows))
+    ratio = elapsed / par
+    overtime = max(0.0, ratio - 1.0)
+
+    score = 1000 - 200 * mistakes_used - int(250 * min(1.0, overtime))
+    score = max(100, int(score))
+
+    if mistakes_used == 0 and ratio <= 1.0:
+        stars = 3
+    elif mistakes_used <= 1 and ratio <= 1.6:
+        stars = 2
+    else:
+        stars = 1
+    return {
+        "score": score,
+        "stars": stars,
+        "par": par,
+        "elapsed": elapsed,
+        "time_ratio": ratio,
+        "mistakes_used": mistakes_used,
+        "max_mistakes": max_mistakes,
+        "n_arrows": n_arrows,
+    }

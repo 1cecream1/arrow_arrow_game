@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "levels": {
+    "0": {
+      "score": 1000,
+      "stars": 3,
+      "best_time": 4.86,
+      "mistakes": 0
+    },
+    "1": {
+      "score": 1000,
+      "stars": 3,
+      "best_time": 6.62,
+      "mistakes": 0
+    }
+  }
+}
